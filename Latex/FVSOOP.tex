@@ -1,0 +1,246 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{hyperref}
+\usepackage{parskip}
+
+\definecolor{kw}{RGB}{0,70,160}
+\definecolor{cm}{RGB}{110,110,110}
+\definecolor{st}{RGB}{160,40,40}
+\definecolor{bg}{RGB}{247,247,250}
+
+\lstdefinelanguage{Lean}{
+  morekeywords={def,theorem,structure,class,instance,inductive,where,namespace,
+    end,deriving,extends,by,do,let,mut,for,in,return,fun,match,with,Type,Prop},
+  sensitive=true,
+  morecomment=[l]{--},
+  morecomment=[s]{/-}{-/},
+  morestring=[b]",
+}
+
+\lstdefinestyle{base}{
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{kw}\bfseries,
+  commentstyle=\color{cm}\itshape,
+  stringstyle=\color{st},
+  backgroundcolor=\color{bg},
+  frame=single, rulecolor=\color{black!15},
+  columns=fullflexible, keepspaces=true,
+  xleftmargin=4pt, xrightmargin=4pt,
+  aboveskip=6pt, belowskip=6pt,
+  literate={α}{{$\alpha$}}1 {→}{{$\to$}}1 {·}{{$\cdot$}}1,
+}
+\lstset{style=base}
+
+\newcommand{\lean}[1]{\lstinline[language=Lean]{#1}}
+
+\title{Functional vs.\ Object-Oriented Programming\\[2pt]
+  \large in the context of Lean~4}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+\vspace{-2.5em}
+
+\section*{The short version}
+
+Lean~4 is a \textbf{purely functional} language. It has no classes, no
+objects with hidden mutable state, and no subclass polymorphism. Yet many
+OOP ideas have a functional counterpart in Lean:
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+\textbf{OOP concept} & \textbf{Lean counterpart} \\
+\midrule
+Class with fields        & \lean{structure} \\
+Methods                  & Functions in the structure's \lean{namespace}, called with dot notation \\
+Inheritance              & \lean{structure B extends A} (composition + automatic projection) \\
+Interface / abstract class & Type class (\lean{class} + \lean{instance}) \\
+Class hierarchy (closed) & \lean{inductive} type + pattern matching \\
+Mutating a field         & Building a new value: \texttt{\{ p with x := ... \}} \\
+Mutable state            & Monads (\lean{StateM}, \lean{IO.Ref}) and \lean{let mut} sugar \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The key difference: in Lean every function is a \emph{mathematical}
+function. Same input, same output, no side effects. That is exactly what
+lets Lean \textbf{prove theorems about programs}.
+
+%--------------------------------------------------------------------
+\section{Data and behaviour}
+
+\textbf{OOP} bundles data and methods into one class; methods act on
+\texttt{this}.
+
+\begin{lstlisting}[language=Java]
+class Point {
+  int x, y;
+  int normSq()             { return x*x + y*y; }
+  void move(int dx, int dy) { x += dx; y += dy; }   // mutates this
+}
+\end{lstlisting}
+
+\textbf{Lean} separates data (\lean{structure}) from functions. Putting the
+functions in the \lean{Point} namespace enables dot notation, so it
+\emph{looks} like a method call, but \lean{p.normSq} is just
+\lean{Point.normSq p}.
+
+\begin{lstlisting}[language=Lean]
+structure Point where
+  x : Int
+  y : Int
+
+namespace Point
+def normSq (p : Point) : Int := p.x * p.x + p.y * p.y
+def move (p : Point) (dx dy : Int) : Point :=
+  { p with x := p.x + dx, y := p.y + dy }   -- returns a NEW point
+end Point
+
+def p : Point := { x := 3, y := 4 }
+#eval p.normSq         -- 25
+#eval (p.move 1 1).x   -- 4
+#eval p.x              -- 3   (p is unchanged)
+\end{lstlisting}
+
+%--------------------------------------------------------------------
+\section{Inheritance vs.\ structure extension}
+
+\textbf{OOP:} \texttt{class ColoredPoint extends Point}. A
+\texttt{ColoredPoint} \emph{is a} \texttt{Point} and can override its
+methods.
+
+\textbf{Lean:} \lean{extends} copies the parent's fields and generates a
+projection \lean{toPoint}. Dot notation searches the parent namespace, so
+parent functions still work. There is \emph{no overriding} and no dynamic
+dispatch: this is composition, not subtyping.
+
+\begin{lstlisting}[language=Lean]
+structure ColoredPoint extends Point where
+  color : String
+
+def cp : ColoredPoint := { x := 1, y := 2, color := "red" }
+#eval cp.normSq        -- 5   (resolved as Point.normSq cp.toPoint)
+\end{lstlisting}
+
+%--------------------------------------------------------------------
+\section{Polymorphism}
+
+OOP uses one mechanism (virtual methods) for two different needs. Lean
+splits them.
+
+\subsection*{Open set of types $\to$ type classes}
+
+Like an interface: anyone can add a new type later by writing an instance.
+Dispatch is resolved at \emph{compile time} by instance search, not at run
+time via a vtable.
+
+\begin{lstlisting}[language=Lean]
+class HasArea (α : Type) where
+  area : α → Nat
+
+structure Square where side : Nat
+structure Rect   where (w h : Nat)
+
+instance : HasArea Square where area s := s.side * s.side
+instance : HasArea Rect   where area r := r.w * r.h
+
+def totalArea {α : Type} [HasArea α] (xs : List α) : Nat :=
+  (xs.map HasArea.area).sum
+
+#eval totalArea [Square.mk 2, Square.mk 3]   -- 13
+\end{lstlisting}
+
+\subsection*{Closed set of cases $\to$ inductive types}
+
+Like a sealed class hierarchy. All variants are known up front, and
+pattern matching must be \emph{exhaustive}, so the compiler rejects a
+forgotten case.
+
+\begin{lstlisting}[language=Lean]
+inductive Shape where
+  | square (side : Nat)
+  | rect   (w h : Nat)
+
+def Shape.area : Shape → Nat
+  | .square s => s * s
+  | .rect w h => w * h
+
+#eval ([.square 2, .rect 2 5] : List Shape).map Shape.area   -- [4, 10]
+\end{lstlisting}
+
+\textit{Trade-off (the ``expression problem''):} OOP makes adding a new
+\emph{type} easy and a new \emph{operation} hard. Inductive types make
+adding a new \emph{operation} easy (just write a function) and a new
+\emph{case} hard (every match must be updated).
+
+%--------------------------------------------------------------------
+\section{State and mutation}
+
+OOP objects carry mutable state. Lean values are immutable; state is
+\emph{modelled explicitly}. The \lean{do}-notation with \lean{let mut}
+looks imperative, but it compiles to pure code.
+
+\begin{lstlisting}[language=Lean]
+def sumTo (n : Nat) : Nat := Id.run do
+  let mut acc := 0
+  for i in [0:n+1] do
+    acc := acc + i
+  return acc
+#eval sumTo 10                    -- 55
+
+-- A "counter object" as an explicit state monad
+def tick : StateM Nat Unit := modify (· + 1)
+def threeTicks : StateM Nat Unit := do tick; tick; tick
+#eval threeTicks.run 0            -- ((), 3)
+\end{lstlisting}
+
+%--------------------------------------------------------------------
+\section{Why it matters: proofs}
+
+Since functions are pure, they can be reasoned about like equations. The
+same file that defines \lean{Point.move} can prove facts about it, checked
+by Lean's kernel.
+
+\begin{lstlisting}[language=Lean]
+theorem move_zero (q : Point) : q.move 0 0 = q := by
+  simp [Point.move]
+
+theorem area_square (n : Nat) : (Shape.square n).area = n * n := rfl
+\end{lstlisting}
+
+In an OOP setting, \texttt{p.move(0,0)} could in principle touch any
+reachable state (logging, other objects, globals), so a statement like the
+one above would not even be well defined without extra assumptions.
+
+%--------------------------------------------------------------------
+\section{Summary}
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lXX@{}}
+\toprule
+ & \textbf{OOP} & \textbf{Lean (functional)} \\
+\midrule
+Core unit      & Object (state + behaviour) & Value + pure function \\
+State          & Mutable, hidden in objects & Immutable; explicit via monads \\
+Reuse          & Inheritance                & \lean{extends}, type classes, composition \\
+Dispatch       & Dynamic (run time)         & Static (instances) or pattern matching \\
+Extensibility  & Easy new types             & Easy new operations (inductives) \\
+Correctness    & Tests                      & Tests \emph{and} machine-checked proofs \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\vfill
+\small\textit{All Lean snippets typecheck with Lean 4.35.0 (core only, no Mathlib).}
+
+\end{document}
